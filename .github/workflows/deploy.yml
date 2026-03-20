@@ -1,0 +1,106 @@
+name: Deploy to AWS Lambda
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: eu-west-2
+  ECR_REPO: peckhamplex-mcp
+  LAMBDA_FUNCTION: peckhamplex-mcp
+  LAMBDA_ROLE: peckhamplex-mcp-lambda-role
+  AWS_ACCOUNT: "716171483364"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create ECR repo if not exists
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_REPO 2>/dev/null || \
+          aws ecr create-repository --repository-name $ECR_REPO --image-scanning-configuration scanOnPush=false
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region $AWS_REGION | \
+          docker login --username AWS --password-stdin $AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com
+
+      - name: Build and push image
+        run: |
+          IMAGE_URI=$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+          docker build -t $ECR_REPO .
+          docker tag $ECR_REPO:latest $IMAGE_URI
+          docker push $IMAGE_URI
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      - name: Create IAM role if not exists
+        run: |
+          aws iam get-role --role-name $LAMBDA_ROLE 2>/dev/null || \
+          aws iam create-role \
+            --role-name $LAMBDA_ROLE \
+            --assume-role-policy-document '{
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": "lambda.amazonaws.com"},
+                "Action": "sts:AssumeRole"
+              }]
+            }'
+          aws iam attach-role-policy \
+            --role-name $LAMBDA_ROLE \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole 2>/dev/null || true
+
+      - name: Deploy Lambda function
+        run: |
+          ROLE_ARN=arn:aws:iam::$AWS_ACCOUNT:role/$LAMBDA_ROLE
+
+          # Check if function exists
+          if aws lambda get-function --function-name $LAMBDA_FUNCTION 2>/dev/null; then
+            echo "Updating existing function..."
+            aws lambda update-function-code \
+              --function-name $LAMBDA_FUNCTION \
+              --image-uri $IMAGE_URI \
+              --publish
+          else
+            echo "Creating new function..."
+            # Wait for role propagation
+            sleep 10
+            aws lambda create-function \
+              --function-name $LAMBDA_FUNCTION \
+              --role $ROLE_ARN \
+              --package-type Image \
+              --code ImageUri=$IMAGE_URI \
+              --timeout 300 \
+              --memory-size 256 \
+              --environment "Variables={MCP_TRANSPORT=sse,PORT=8080}" \
+              --publish
+          fi
+
+          # Wait for function to be active
+          aws lambda wait function-active-v2 --function-name $LAMBDA_FUNCTION
+
+      - name: Create Function URL with streaming
+        run: |
+          FUNC_URL=$(aws lambda get-function-url-config --function-name $LAMBDA_FUNCTION 2>/dev/null | jq -r '.FunctionUrl' || echo "")
+          if [ -z "$FUNC_URL" ] || [ "$FUNC_URL" = "null" ]; then
+            aws lambda add-permission \
+              --function-name $LAMBDA_FUNCTION \
+              --statement-id FunctionURLAllowPublicAccess \
+              --action lambda:InvokeFunctionUrl \
+              --principal "*" \
+              --function-url-auth-type NONE 2>/dev/null || true
+            FUNC_URL=$(aws lambda create-function-url-config \
+              --function-name $LAMBDA_FUNCTION \
+              --auth-type NONE \
+              --invoke-mode RESPONSE_STREAM | jq -r '.FunctionUrl')
+          fi
+          echo "Function URL: $FUNC_URL"
