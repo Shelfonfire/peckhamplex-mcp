@@ -63,45 +63,44 @@ jobs:
         run: |
           ROLE_ARN=arn:aws:iam::$AWS_ACCOUNT:role/$LAMBDA_ROLE
 
-          # Check if function exists
           if aws lambda get-function --function-name $LAMBDA_FUNCTION 2>/dev/null; then
             echo "Updating existing function..."
             aws lambda update-function-code \
               --function-name $LAMBDA_FUNCTION \
-              --image-uri $IMAGE_URI \
-              --publish
+              --image-uri $IMAGE_URI
+            aws lambda wait function-updated --function-name $LAMBDA_FUNCTION
           else
             echo "Creating new function..."
-            # Wait for role propagation
             sleep 10
             aws lambda create-function \
               --function-name $LAMBDA_FUNCTION \
               --role $ROLE_ARN \
               --package-type Image \
               --code ImageUri=$IMAGE_URI \
-              --timeout 300 \
-              --memory-size 256 \
-              --environment "Variables={MCP_TRANSPORT=streamable-http,PORT=8080}" \
-              --publish
+              --timeout 30 \
+              --memory-size 256
+            aws lambda wait function-active-v2 --function-name $LAMBDA_FUNCTION
           fi
 
-          # Wait for function to be active
-          aws lambda wait function-active-v2 --function-name $LAMBDA_FUNCTION
-
-
-      - name: Create Function URL with streaming
+      - name: Configure Function URL
         run: |
-          FUNC_URL=$(aws lambda get-function-url-config --function-name $LAMBDA_FUNCTION 2>/dev/null | jq -r '.FunctionUrl' || echo "")
-          if [ -z "$FUNC_URL" ] || [ "$FUNC_URL" = "null" ]; then
+          # Update to BUFFERED mode if exists, or create new
+          if aws lambda get-function-url-config --function-name $LAMBDA_FUNCTION 2>/dev/null; then
+            aws lambda update-function-url-config \
+              --function-name $LAMBDA_FUNCTION \
+              --auth-type NONE \
+              --invoke-mode BUFFERED
+          else
             aws lambda add-permission \
               --function-name $LAMBDA_FUNCTION \
               --statement-id FunctionURLAllowPublicAccess \
               --action lambda:InvokeFunctionUrl \
               --principal "*" \
               --function-url-auth-type NONE 2>/dev/null || true
-            FUNC_URL=$(aws lambda create-function-url-config \
+            aws lambda create-function-url-config \
               --function-name $LAMBDA_FUNCTION \
               --auth-type NONE \
-              --invoke-mode RESPONSE_STREAM | jq -r '.FunctionUrl')
+              --invoke-mode BUFFERED
           fi
-          echo "Function URL: $FUNC_URL"
+          URL=$(aws lambda get-function-url-config --function-name $LAMBDA_FUNCTION --query 'FunctionUrl' --output text)
+          echo "Function URL: ${URL}mcp"
