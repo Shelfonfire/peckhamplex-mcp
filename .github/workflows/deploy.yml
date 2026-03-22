@@ -81,7 +81,7 @@ jobs:
               --code ImageUri=$IMAGE_URI \
               --timeout 300 \
               --memory-size 256 \
-              --environment "Variables={MCP_TRANSPORT=sse,PORT=8080}" \
+              --environment "Variables={MCP_TRANSPORT=streamable-http,PORT=8080}" \
               --publish
           fi
 
