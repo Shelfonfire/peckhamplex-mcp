@@ -5,7 +5,10 @@ from datetime import date, datetime
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("peckhamplex")
+import os
+
+port = int(os.environ.get("PORT", "8080"))
+mcp = FastMCP("peckhamplex", port=port, host="0.0.0.0")
 
 BASE = "https://www.peckhamplex.london/api/v1/film"
 
@@ -104,10 +107,5 @@ async def get_screenings_by_date(screening_date: str = "") -> str:
 
 
 if __name__ == "__main__":
-    import os
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
-    if transport == "sse":
-        port = int(os.environ.get("PORT", "8080"))
-        mcp.run(transport="sse")
-    else:
-        mcp.run()
+    mcp.run(transport=transport)
