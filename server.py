@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -12,19 +12,49 @@ mcp = FastMCP("peckhamplex", port=port, host="0.0.0.0", stateless_http=True, jso
 
 BASE = "https://www.peckhamplex.london/api/v1/film"
 
+UK_TZ = timezone(timedelta(hours=0))  # GMT baseline; BST handled below
+
+
+def _uk_today() -> date:
+    """Return today's date in UK time (handles GMT/BST)."""
+    now_utc = datetime.now(timezone.utc)
+    year = now_utc.year
+    # BST: last Sunday of March 01:00 UTC to last Sunday of October 01:00 UTC
+    mar_last_sun = 31 - (datetime(year, 3, 31).weekday() + 1) % 7
+    oct_last_sun = 31 - (datetime(year, 10, 31).weekday() + 1) % 7
+    bst_start = datetime(year, 3, mar_last_sun, 1, tzinfo=timezone.utc)
+    bst_end = datetime(year, 10, oct_last_sun, 1, tzinfo=timezone.utc)
+    offset = timedelta(hours=1) if bst_start <= now_utc < bst_end else timedelta(hours=0)
+    return (now_utc + offset).date()
+
+
+_cache: dict[str, tuple[date, dict]] = {}
+
 
 async def _fetch_by_title() -> dict:
+    today = _uk_today()
+    cached = _cache.get("by_title")
+    if cached and cached[0] == today:
+        return cached[1]
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.get(f"{BASE}/by/title")
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+    _cache["by_title"] = (today, data)
+    return data
 
 
 async def _fetch_by_dates() -> dict:
+    today = _uk_today()
+    cached = _cache.get("by_dates")
+    if cached and cached[0] == today:
+        return cached[1]
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.get(f"{BASE}/by/dates")
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+    _cache["by_dates"] = (today, data)
+    return data
 
 
 @mcp.tool()
